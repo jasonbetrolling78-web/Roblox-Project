@@ -1,0 +1,6 @@
+flask
+gunicorn
+edge-tts
+openai-whisper
+google-api-python-client
+google-auth
