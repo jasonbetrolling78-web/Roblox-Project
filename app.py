@@ -16,7 +16,13 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 BASE_URL = os.environ.get("BASE_URL", "https://your-service.onrender.com")
 VOICE_DEFAULT = "fr-FR-DeniseNeural"
 
-whisper_model = whisper.load_model("base")  # "tiny" si le serveur free tier rame
+whisper_model = None
+
+def get_whisper_model():
+    global whisper_model
+    if whisper_model is None:
+        whisper_model = whisper.load_model("tiny")
+    return whisper_model
 
 def get_drive_service():
     creds = service_account.Credentials.from_service_account_info(
@@ -54,9 +60,10 @@ def get_audio_duration(path):
         capture_output=True, text=True
     )
     return float(result.stdout.strip())
-
+    
 def transcribe_words(audio_path):
-    result = whisper_model.transcribe(audio_path, word_timestamps=True)
+    model = get_whisper_model()
+    result = model.transcribe(audio_path, word_timestamps=True)
     words = []
     for segment in result["segments"]:
         for w in segment.get("words", []):
