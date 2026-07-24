@@ -1,5 +1,6 @@
 import os, json, random, subprocess, tempfile, uuid, io
 from flask import Flask, request, jsonify, send_from_directory
+from googleapiclient.http import MediaFileUpload
 import edge_tts
 import asyncio
 import whisper
@@ -156,6 +157,71 @@ def outputs(filename):
 @app.route("/")
 def health():
     return "OK"
+
+def download_drive_file(service, file_id, out_path):
+    req = service.files().get_media(fileId=file_id)
+    with io.FileIO(out_path, "wb") as fh:
+        downloader = MediaIoBaseDownload(fh, req)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+
+def upload_to_drive(service, local_path, filename, folder_id):
+    from googleapiclient.http import MediaFileUpload
+    file_metadata = {"name": filename, "parents": [folder_id]}
+    media = MediaFileUpload(local_path, mimetype="video/mp4")
+    file = service.files().create(body=file_metadata, media_body=media, fields="id, webViewLink").execute()
+    return file
+
+@app.route("/stitch", methods=["POST"])
+def stitch():
+    if request.headers.get("X-Api-Secret") != API_SECRET:
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json()
+    batch_folder_id = data["batchFolderId"]
+    destination_folder_id = data["destinationFolderId"]
+    output_name = data.get("outputName", f"story_{uuid.uuid4()}.mp4")
+
+    # Comptes de service en lecture/écriture (nécessite le scope drive, pas drive.readonly)
+    creds = service_account.Credentials.from_service_account_info(
+        SERVICE_ACCOUNT_INFO, scopes=["https://www.googleapis.com/auth/drive"]
+    )
+    service = build("drive", "v3", credentials=creds)
+
+    # Récupère tous les clips du dossier, triés par nom (clip_1_..., clip_2_..., etc.)
+    results = service.files().list(
+        q=f"'{batch_folder_id}' in parents and mimeType contains 'video/' and trashed=false",
+        fields="files(id, name)", orderBy="name"
+    ).execute()
+    files = sorted(results.get("files", []), key=lambda f: int(f["name"].split("_")[1]))
+
+    if not files:
+        return jsonify({"error": "Aucun clip trouvé dans le dossier."}), 400
+
+    tmp = tempfile.gettempdir()
+    local_paths = []
+    for f in files:
+        path = os.path.join(tmp, f["id"] + ".mp4")
+        download_drive_file(service, f["id"], path)
+        local_paths.append(path)
+
+    # Fichier de concaténation ffmpeg
+    concat_list_path = os.path.join(tmp, f"concat_{uuid.uuid4()}.txt")
+    with open(concat_list_path, "w") as f:
+        for p in local_paths:
+            f.write(f"file '{p}'\n")
+
+    stitched_path = os.path.join(tmp, f"stitched_{uuid.uuid4()}.mp4")
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", concat_list_path,
+        "-c", "copy", stitched_path
+    ], check=True)
+
+    uploaded = upload_to_drive(service, stitched_path, output_name, destination_folder_id)
+
+    return jsonify({"driveFileId": uploaded["id"], "webViewLink": uploaded.get("webViewLink")})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
